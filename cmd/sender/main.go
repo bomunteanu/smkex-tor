@@ -13,11 +13,12 @@ import (
 )
 
 func main() {
-	torExePath := `C:\Users\bogda\Desktop\smkex-tor\tor\tor\tor.exe`
+	torExePath, err := torpkg.GetTorExecutablePath()
 
 	// Start Tor instance
 	torInstance, err := tor.Start(context.Background(), &tor.StartConf{
-		ProcessCreator: process.NewCreator(torExePath),
+		ProcessCreator:  process.NewCreator(torExePath),
+		TempDataDirBase: "logs",
 	})
 	if err != nil {
 		panic(fmt.Errorf("failed to start Tor instance: %w", err))
@@ -37,13 +38,13 @@ func main() {
 	// Encrypt data
 	key := []byte("example key 1234") // 16 bytes key
 	data := []byte("Hello, World!")
-	encryptedData, err := crypto.Encrypt(data, key)
+	encryptedData, err := crypto.Encrypt(data, key, nil)
 	if err != nil {
 		panic(fmt.Errorf("encryption failed: %w", err))
 	}
 
 	// Hidden service address of the receiver
-	onionAddress := "g3lbtsdgtwucjt2wg5txz3c3pj44uemqmmlchlg432dmhlzoa6wqdsid.onion:8000"
+	onionAddress := "ixa5wwzqwdgvcm3cpoytf622ladfamz63yjc73bwi25egqxobhp7bvid.onion:8000"
 
 	// Use wait group to wait for goroutines to finish
 	var wg sync.WaitGroup

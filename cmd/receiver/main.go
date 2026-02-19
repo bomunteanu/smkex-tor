@@ -6,15 +6,19 @@ import (
 	"time"
 
 	pkg "github.com/bobomunteanu/smkex-tor/pkg/tor"
+	torpkg "github.com/bobomunteanu/smkex-tor/pkg/tor"
 	"github.com/cretz/bine/process"
 	"github.com/cretz/bine/tor"
 )
 
 func main() {
-	torExePath := `C:\Users\bogda\Desktop\smkex-tor\tor\tor\tor.exe`
+	torExePath, err := torpkg.GetTorExecutablePath()
 
 	// Start Tor instance
-	t, err := tor.Start(context.TODO(), &tor.StartConf{ProcessCreator: process.NewCreator(torExePath)})
+	t, err := tor.Start(context.TODO(), &tor.StartConf{
+		ProcessCreator:  process.NewCreator(torExePath),
+		TempDataDirBase: "logs",
+	})
 	if err != nil {
 		panic(err)
 	}
