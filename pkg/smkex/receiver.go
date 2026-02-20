@@ -9,7 +9,8 @@ import (
 	crypto "github.com/bobomunteanu/smkex-tor/pkg/cryptography"
 )
 
-// sessionHalf holds whichever half of a handshake arrived first while waiting for the other half to come in on the other connection
+// sessionHalf holds whichever half of a handshake arrived first while
+// waiting for the other half on the other connection.
 type sessionHalf struct {
 	msg       *Message
 	arrivedAt time.Time
@@ -70,14 +71,17 @@ func (ps *pendingSessions) evictExpired() {
 	}
 }
 
-func ReceiverHandshake(listener1, listener2 net.Listener) ([]byte, error) {
+// ReceiverHandshake accepts one connection on each listener, completes the
+// SMKEX handshake, and returns a Session ready for encrypted data transfer.
+//
+// The path-2 connection is closed after the handshake. The path-1 connection
+// is transferred into the returned Session — use Session.Close() to release it.
+func ReceiverHandshake(listener1, listener2 net.Listener) (*Session, error) {
 	pending := newPendingSessions()
 
 	type pairedResult struct {
-		msg1  *Message
-		msg2  *Message
-		conn1 net.Conn
-		conn2 net.Conn
+		msg1 *Message
+		msg2 *Message
 	}
 	paired := make(chan pairedResult, 1)
 	errCh := make(chan error, 2)
@@ -114,8 +118,6 @@ func ReceiverHandshake(listener1, listener2 net.Listener) ([]byte, error) {
 
 		msg1, msg2, complete := pending.tryPair(msg, path)
 		if complete {
-			_ = msg1
-			_ = msg2
 			paired <- pairedResult{msg1: msg1, msg2: msg2}
 		}
 	}
@@ -147,28 +149,26 @@ func ReceiverHandshake(listener1, listener2 net.Listener) ([]byte, error) {
 		return nil, fmt.Errorf("receiver: handshake messages could not be paired")
 	}
 
-	result.conn1 = conn1
-	result.conn2 = conn2
-	defer conn1.Close()
-	defer conn2.Close()
-
-	// extract g^x and NC from the paired messages
+	// Extract g^x and NC from the paired messages.
 	gx := result.msg1.Payload
 	nc := result.msg2.Payload
 	sessionID := result.msg1.SessionID
 
 	keyPair, err := crypto.GenerateKeyPair()
 	if err != nil {
+		conn1.Close()
+		conn2.Close()
 		return nil, fmt.Errorf("receiver: failed to generate key pair: %w", err)
 	}
 
 	ns, err := crypto.GenerateNonce()
 	if err != nil {
+		conn1.Close()
+		conn2.Close()
 		return nil, fmt.Errorf("receiver: failed to generate nonce: %w", err)
 	}
 
 	bindingHash := crypto.BindingHash(gx, nc, keyPair.PublicKey, ns)
-
 	path2Payload := append(ns, bindingHash...)
 
 	var sendErr1, sendErr2 error
@@ -189,22 +189,33 @@ func ReceiverHandshake(listener1, listener2 net.Listener) ([]byte, error) {
 
 	sendWg.Wait()
 
+	// Path 2 is no longer needed — close it now.
+	conn2.Close()
+
 	if sendErr1 != nil {
+		conn1.Close()
 		return nil, fmt.Errorf("receiver: failed to send public key on path 1: %w", sendErr1)
 	}
 	if sendErr2 != nil {
+		conn1.Close()
 		return nil, fmt.Errorf("receiver: failed to send nonce+hash on path 2: %w", sendErr2)
 	}
 
 	sharedSecret, err := keyPair.ComputeSharedSecret(gx)
 	if err != nil {
+		conn1.Close()
 		return nil, fmt.Errorf("receiver: failed to compute shared secret: %w", err)
 	}
 
 	sessionKey, err := crypto.DeriveSessionKey(sharedSecret, nc, ns)
 	if err != nil {
+		conn1.Close()
 		return nil, fmt.Errorf("receiver: failed to derive session key: %w", err)
 	}
 
-	return sessionKey, nil
+	return &Session{
+		sessionID: sessionID,
+		key:       sessionKey,
+		conn:      conn1,
+	}, nil
 }

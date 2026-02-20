@@ -19,7 +19,7 @@ func main() {
 		log.Fatalf("tor binary not found: %v", err)
 	}
 
-	// start two independent Tor instances in parallel
+	// Start two independent Tor instances in parallel.
 	fmt.Println("Starting two Tor instances (this takes ~1 min)...")
 	instances, runDir, err := torpkg.StartInstances(torExePath, "logs/receiver", 2)
 	if err != nil {
@@ -30,7 +30,7 @@ func main() {
 	defer instances[1].Close()
 	fmt.Println("Both Tor instances ready.")
 
-	// give each hidden service a 3-minute window to be published to Tor
+	// Give each hidden service a 3-minute window to be published to Tor.
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Minute)
 	defer cancel()
 
@@ -69,11 +69,21 @@ func main() {
 	fmt.Println()
 	fmt.Println("Waiting for sender to connect on both paths...")
 
-	// ReceiverHandshake blocks until the sender connects on both paths, completes the key exchange, and returns the derived session key
-	sessionKey, err := smkex.ReceiverHandshake(listener1, listener2)
+	// ReceiverHandshake blocks until the sender connects on both paths,
+	// completes the key exchange, and returns a ready Session.
+	session, err := smkex.ReceiverHandshake(listener1, listener2)
 	if err != nil {
 		log.Fatalf("SMKEX handshake failed: %v", err)
 	}
+	defer session.Close()
 
-	fmt.Printf("\nHandshake complete!\nSession key: %x\n", sessionKey)
+	fmt.Printf("\nHandshake complete!\nSession key: %x\n\n", session.Key())
+	fmt.Println("Waiting for encrypted message from sender...")
+
+	plaintext, err := session.ReceiveMessage()
+	if err != nil {
+		log.Fatalf("failed to receive message: %v", err)
+	}
+
+	fmt.Printf("\n=== Decrypted message ===\n%s\n========================\n", plaintext)
 }

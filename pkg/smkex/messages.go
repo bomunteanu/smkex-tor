@@ -10,21 +10,12 @@ import (
 type MessageType uint8
 
 const (
-	// MsgSenderPath1 is sent by the sender on connection 1
-	// Payload: sender's X25519 public key (g^x), 32 bytes
-	MsgSenderPath1 MessageType = 0x01
-
-	// MsgSenderPath2 is sent by the sender on connection 2
-	// Payload: sender's nonce NC, 32 bytes
-	MsgSenderPath2 MessageType = 0x02
-
-	// MsgReceiverPath1 is sent by the receiver back on connection 1
-	// Payload: receiver's X25519 public key (g^y), 32 bytes
+	MsgSenderPath1   MessageType = 0x01
+	MsgSenderPath2   MessageType = 0x02
 	MsgReceiverPath1 MessageType = 0x03
-
-	// MsgReceiverPath2 is sent by the receiver back on connection 2
-	// Payload: receiver's nonce NS (32 bytes) || binding hash H(gx,NC,gy,NS) (32 bytes)
 	MsgReceiverPath2 MessageType = 0x04
+
+	MsgData MessageType = 0x05
 )
 
 // length of the session identifier in bytes

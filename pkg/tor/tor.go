@@ -15,6 +15,10 @@ import (
 	"github.com/cretz/bine/tor"
 )
 
+// guardSelectionTimeout is how long we allow for selecting diverse guards and
+// waiting for circuits to be verified through them.
+const guardSelectionTimeout = 90 * time.Second
+
 func GetTorExecutablePath() (string, error) {
 	var exeName string
 	if runtime.GOOS == "windows" {
@@ -104,6 +108,67 @@ func StartInstances(exePath, baseDir string, n int) ([]*tor.Tor, string, error) 
 			}
 			os.RemoveAll(runDir)
 			return nil, "", err
+		}
+	}
+
+	// ── Geographic guard pinning ──────────────────────────────────────────
+	// Only applies when we have exactly two instances (the SMKEX case).
+	// We use instance 0 to query the consensus — both instances see the same
+	// network — select two guards from different countries, then pin each
+	// instance to its respective guard and wait for circuits to confirm.
+	if n == 2 {
+		fmt.Println("[guards] selecting geographically diverse entry guards...")
+		guard1, guard2, err := SelectDiverseGuards(instances[0])
+		if err != nil {
+			// Non-fatal: log and continue. Tor will still work, just without
+			// guaranteed geographic diversity.
+			fmt.Printf("[guards] warning: could not select diverse guards: %v\n", err)
+		} else {
+			// Pin both instances in parallel.
+			var pinErrs [2]error
+			var pinWg sync.WaitGroup
+			pinWg.Add(2)
+			go func() {
+				defer pinWg.Done()
+				pinErrs[0] = PinGuard(instances[0], guard1)
+			}()
+			go func() {
+				defer pinWg.Done()
+				pinErrs[1] = PinGuard(instances[1], guard2)
+			}()
+			pinWg.Wait()
+
+			for i, e := range pinErrs {
+				if e != nil {
+					fmt.Printf("[tor%d] warning: could not pin guard: %v\n", i, e)
+				}
+			}
+
+			// Wait for a BUILT circuit through each pinned guard. This
+			// confirms Tor accepted the SETCONF and has an active path.
+			// We do this in parallel with a shared timeout.
+			fp1, err1 := guard1.FingerprintHex()
+			fp2, err2 := guard2.FingerprintHex()
+			if err1 == nil && err2 == nil {
+				pinWg.Add(2)
+				go func() {
+					defer pinWg.Done()
+					if err := WaitForGuardCircuit(instances[0], fp1, guardSelectionTimeout); err != nil {
+						fmt.Printf("[tor0] warning: %v\n", err)
+					} else {
+						fmt.Printf("[tor0] guard circuit verified: %s\n", guard1.Nickname)
+					}
+				}()
+				go func() {
+					defer pinWg.Done()
+					if err := WaitForGuardCircuit(instances[1], fp2, guardSelectionTimeout); err != nil {
+						fmt.Printf("[tor1] warning: %v\n", err)
+					} else {
+						fmt.Printf("[tor1] guard circuit verified: %s\n", guard2.Nickname)
+					}
+				}()
+				pinWg.Wait()
+			}
 		}
 	}
 

@@ -9,7 +9,13 @@ import (
 	crypto "github.com/bobomunteanu/smkex-tor/pkg/cryptography"
 )
 
-func SenderHandshake(conn1, conn2 net.Conn) ([]byte, error) {
+// SenderHandshake performs the SMKEX handshake over conn1 (path 1) and conn2
+// (path 2) and returns a Session ready for encrypted data transfer.
+//
+// conn2 is only used during the handshake; it is closed before this function
+// returns. conn1 is transferred into the returned Session and must NOT be
+// closed by the caller — use Session.Close() instead.
+func SenderHandshake(conn1, conn2 net.Conn) (*Session, error) {
 	keyPair, err := crypto.GenerateKeyPair()
 	if err != nil {
 		return nil, fmt.Errorf("sender: failed to generate key pair: %w", err)
@@ -86,7 +92,6 @@ func SenderHandshake(conn1, conn2 net.Conn) ([]byte, error) {
 		return nil, fmt.Errorf("sender: invalid path 2 reply: %w", err)
 	}
 
-	// session ids match
 	if msg1.SessionID != sessionID {
 		return nil, fmt.Errorf("sender: session ID mismatch on path 1 reply")
 	}
@@ -112,5 +117,12 @@ func SenderHandshake(conn1, conn2 net.Conn) ([]byte, error) {
 		return nil, fmt.Errorf("sender: failed to derive session key: %w", err)
 	}
 
-	return sessionKey, nil
+	// Path 2 is no longer needed — handshake is complete.
+	conn2.Close()
+
+	return &Session{
+		sessionID: sessionID,
+		key:       sessionKey,
+		conn:      conn1,
+	}, nil
 }

@@ -1,11 +1,13 @@
 package main
 
 import (
+	"bufio"
 	"context"
 	"fmt"
 	"log"
 	"net"
 	"os"
+	"strings"
 	"sync"
 	"time"
 
@@ -14,8 +16,8 @@ import (
 )
 
 func main() {
-	if len(os.Args) != 3 {
-		log.Fatalf("usage: sender <path1-onion-addr> <path2-onion-addr>\n  e.g. sender abc.onion:8001 xyz.onion:8002")
+	if len(os.Args) < 3 {
+		log.Fatalf("usage: sender <path1-onion-addr> <path2-onion-addr> [message]\n  e.g. sender abc.onion:8001 xyz.onion:8002")
 	}
 	addr1 := os.Args[1]
 	addr2 := os.Args[2]
@@ -25,7 +27,7 @@ func main() {
 		log.Fatalf("tor binary not found: %v", err)
 	}
 
-	// start two independent Tor instances in parallel
+	// Start two independent Tor instances in parallel.
 	fmt.Println("Starting two Tor instances (this takes ~1 min)...")
 	instances, runDir, err := torpkg.StartInstances(torExePath, "logs/sender", 2)
 	if err != nil {
@@ -67,15 +69,42 @@ func main() {
 	if dialErr2 != nil {
 		log.Fatalf("failed to dial path 2: %v", dialErr2)
 	}
-	defer conn1.Close()
+	// conn2 is closed inside SenderHandshake once the handshake completes.
+	// conn1 is owned by the returned Session; do not close it directly.
 	defer conn2.Close()
 
 	fmt.Println("Connected on both paths. Starting SMKEX handshake...")
 
-	sessionKey, err := smkex.SenderHandshake(conn1, conn2)
+	session, err := smkex.SenderHandshake(conn1, conn2)
 	if err != nil {
 		log.Fatalf("SMKEX handshake failed: %v", err)
 	}
+	defer session.Close()
 
-	fmt.Printf("\nHandshake complete!\nSession key: %x\n", sessionKey)
+	fmt.Printf("\nHandshake complete!\nSession key: %x\n\n", session.Key())
+
+	// ------------------------------------------------------------------
+	// Post-handshake: encrypt and send a message to the receiver.
+	// ------------------------------------------------------------------
+	var plaintext string
+	if len(os.Args) >= 4 {
+		// Message supplied as trailing command-line arguments.
+		plaintext = strings.Join(os.Args[3:], " ")
+	} else {
+		// Prompt the user interactively.
+		fmt.Print("Enter message to send: ")
+		scanner := bufio.NewScanner(os.Stdin)
+		if scanner.Scan() {
+			plaintext = scanner.Text()
+		}
+		if err := scanner.Err(); err != nil {
+			log.Fatalf("failed to read message from stdin: %v", err)
+		}
+	}
+
+	if err := session.SendMessage([]byte(plaintext)); err != nil {
+		log.Fatalf("failed to send encrypted message: %v", err)
+	}
+
+	fmt.Println("Message sent (encrypted).")
 }
