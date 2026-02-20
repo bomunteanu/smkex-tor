@@ -1,0 +1,9 @@
+# Tor runtime data directories (created fresh on each run, deleted on exit)
+logs/
+
+# Go build artifacts
+/sender
+/receiver
+
+# macOS
+.DS_Store

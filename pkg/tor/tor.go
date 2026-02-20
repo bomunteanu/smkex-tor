@@ -1,4 +1,4 @@
-package pkg
+package torpkg
 
 import (
 	"context"
@@ -8,14 +8,13 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"sync"
 	"time"
 
-	pkg "github.com/bobomunteanu/smkex-tor/pkg/cryptography"
+	"github.com/cretz/bine/process"
 	"github.com/cretz/bine/tor"
 )
 
-// GetTorExecutablePath returns the path to the Tor executable based on the OS.
-// It checks for a local binary first, then falls back to looking in the PATH.
 func GetTorExecutablePath() (string, error) {
 	var exeName string
 	if runtime.GOOS == "windows" {
@@ -24,8 +23,6 @@ func GetTorExecutablePath() (string, error) {
 		exeName = "tor"
 	}
 
-	// 1. Check relative path from project root: tor/tor/tor(.exe)
-	// We assume the application is run from the project root.
 	localPath := filepath.Join("tor", "tor", exeName)
 	if _, err := os.Stat(localPath); err == nil {
 		absPath, err := filepath.Abs(localPath)
@@ -34,7 +31,6 @@ func GetTorExecutablePath() (string, error) {
 		}
 	}
 
-	// 2. Check in PATH
 	path, err := exec.LookPath(exeName)
 	if err == nil {
 		return path, nil
@@ -43,69 +39,101 @@ func GetTorExecutablePath() (string, error) {
 	return "", fmt.Errorf("tor executable not found locally at %s or in PATH", localPath)
 }
 
-func StartHiddenService(t *tor.Tor) (string, error) {
+func StartInstance(exePath, dataDir string) (*tor.Tor, error) {
+	if err := os.MkdirAll(dataDir, 0700); err != nil {
+		return nil, fmt.Errorf("failed to create data dir %s: %w", dataDir, err)
+	}
+
+	t, err := tor.Start(context.Background(), &tor.StartConf{
+		ProcessCreator: process.NewCreator(exePath),
+		DataDir:        dataDir,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("failed to start Tor process (%s): %w", dataDir, err)
+	}
+
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Minute)
 	defer cancel()
 
-	onion, err := t.Listen(ctx, &tor.ListenConf{Version3: true, LocalPort: 8000})
-	if err != nil {
-		return "", err
+	if err := t.EnableNetwork(ctx, true); err != nil {
+		t.Close()
+		return nil, fmt.Errorf("Tor bootstrap failed (%s): %w", dataDir, err)
 	}
 
-	fmt.Println("Onion service running at:", onion.ID+".onion")
+	return t, nil
+}
 
-	go func() {
-		for {
-			conn, err := onion.Accept()
+func StartInstances(exePath, baseDir string, n int) ([]*tor.Tor, string, error) {
+	if err := os.MkdirAll(baseDir, 0700); err != nil {
+		return nil, "", fmt.Errorf("failed to create base dir %s: %w", baseDir, err)
+	}
+
+	runDir, err := os.MkdirTemp(baseDir, "run-")
+	if err != nil {
+		return nil, "", fmt.Errorf("failed to create run dir under %s: %w", baseDir, err)
+	}
+
+	instances := make([]*tor.Tor, n)
+	errs := make([]error, n)
+
+	var wg sync.WaitGroup
+	wg.Add(n)
+	for i := 0; i < n; i++ {
+		i := i
+		go func() {
+			defer wg.Done()
+			dataDir := filepath.Join(runDir, fmt.Sprintf("tor%d", i))
+			fmt.Printf("[tor%d] bootstrapping...\n", i)
+			t, err := StartInstance(exePath, dataDir)
 			if err != nil {
-				fmt.Println("Failed to accept connection:", err)
+				errs[i] = err
 				return
 			}
+			fmt.Printf("[tor%d] ready\n", i)
+			instances[i] = t
+		}()
+	}
+	wg.Wait()
 
-			go HandleConnection(conn)
+	for _, err := range errs {
+		if err != nil {
+			for _, t := range instances {
+				if t != nil {
+					t.Close()
+				}
+			}
+			os.RemoveAll(runDir)
+			return nil, "", err
 		}
-	}()
+	}
 
-	return onion.ID + ".onion", nil
+	return instances, runDir, nil
 }
 
-func HandleConnection(conn net.Conn) {
-	defer conn.Close()
-	buf := make([]byte, 1024)
-	n, err := conn.Read(buf)
+func ListenOnion(t *tor.Tor, ctx context.Context, localPort int) (net.Listener, string, error) {
+	onion, err := t.Listen(ctx, &tor.ListenConf{
+		Version3:    true,
+		LocalPort:   localPort,
+		RemotePorts: []int{localPort},
+	})
 	if err != nil {
-		fmt.Println("Failed to read data:", err)
-		return
+		return nil, "", fmt.Errorf("failed to start hidden service on port %d: %w", localPort, err)
 	}
 
-	encryptedData := buf[:n]
-	key := []byte("example key 1234") // 16 bytes key
-	decryptedData, err := pkg.Decrypt(encryptedData, key, nil)
-	if err != nil {
-		fmt.Println("Failed to decrypt data:", err)
-		return
-	}
-
-	fmt.Println("Received and decrypted data:", string(decryptedData))
+	addr := fmt.Sprintf("%s.onion:%d", onion.ID, localPort)
+	return onion, addr, nil
 }
 
-// Send data through a specific Tor circuit
-func SendThroughTor(data []byte, torInstance *tor.Tor, ctx context.Context, onionAddress string) error {
-	dialer, err := torInstance.Dialer(ctx, nil)
+func DialThroughTor(t *tor.Tor, ctx context.Context, addr string) (net.Conn, error) {
+	dialer, err := t.Dialer(ctx, nil)
 	if err != nil {
-		return err
+		return nil, fmt.Errorf("failed to create Tor dialer: %w", err)
 	}
 
-	conn, err := dialer.Dial("tcp", onionAddress)
+	conn, err := dialer.Dial("tcp", addr)
 	if err != nil {
-		return err
-	}
-	defer conn.Close()
-
-	_, err = conn.Write(data)
-	if err != nil {
-		return err
+		return nil, fmt.Errorf("failed to dial %s through Tor: %w", addr, err)
 	}
 
-	return nil
+	return conn, nil
 }

@@ -3,70 +3,79 @@ package main
 import (
 	"context"
 	"fmt"
+	"log"
+	"net"
+	"os"
 	"sync"
 	"time"
 
-	crypto "github.com/bobomunteanu/smkex-tor/pkg/cryptography"
+	"github.com/bobomunteanu/smkex-tor/pkg/smkex"
 	torpkg "github.com/bobomunteanu/smkex-tor/pkg/tor"
-	"github.com/cretz/bine/process"
-	"github.com/cretz/bine/tor"
 )
 
 func main() {
-	torExePath, err := torpkg.GetTorExecutablePath()
+	if len(os.Args) != 3 {
+		log.Fatalf("usage: sender <path1-onion-addr> <path2-onion-addr>\n  e.g. sender abc.onion:8001 xyz.onion:8002")
+	}
+	addr1 := os.Args[1]
+	addr2 := os.Args[2]
 
-	// Start Tor instance
-	torInstance, err := tor.Start(context.Background(), &tor.StartConf{
-		ProcessCreator:  process.NewCreator(torExePath),
-		TempDataDirBase: "logs",
-	})
+	torExePath, err := torpkg.GetTorExecutablePath()
 	if err != nil {
-		panic(fmt.Errorf("failed to start Tor instance: %w", err))
+		log.Fatalf("tor binary not found: %v", err)
 	}
 
-	// Ensure Tor instance is closed when main function exits
-	defer torInstance.Close()
+	// start two independent Tor instances in parallel
+	fmt.Println("Starting two Tor instances (this takes ~1 min)...")
+	instances, runDir, err := torpkg.StartInstances(torExePath, "logs/sender", 2)
+	if err != nil {
+		log.Fatalf("failed to start Tor instances: %v", err)
+	}
+	defer os.RemoveAll(runDir)
+	defer instances[0].Close()
+	defer instances[1].Close()
+	fmt.Println("Both Tor instances ready.")
 
-	// Enable Tor network
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Minute)
 	defer cancel()
 
-	if err := torInstance.EnableNetwork(ctx, true); err != nil {
-		panic(fmt.Errorf("failed to enable Tor network: %w", err))
-	}
+	var (
+		conn1    net.Conn
+		conn2    net.Conn
+		dialErr1 error
+		dialErr2 error
+		wg       sync.WaitGroup
+	)
 
-	// Encrypt data
-	key := []byte("example key 1234") // 16 bytes key
-	data := []byte("Hello, World!")
-	encryptedData, err := crypto.Encrypt(data, key, nil)
-	if err != nil {
-		panic(fmt.Errorf("encryption failed: %w", err))
-	}
+	fmt.Printf("Dialing path 1 (%s) via tor0...\n", addr1)
+	fmt.Printf("Dialing path 2 (%s) via tor1...\n", addr2)
 
-	// Hidden service address of the receiver
-	onionAddress := "ixa5wwzqwdgvcm3cpoytf622ladfamz63yjc73bwi25egqxobhp7bvid.onion:8000"
-
-	// Use wait group to wait for goroutines to finish
-	var wg sync.WaitGroup
 	wg.Add(2)
-
-	// Send encrypted data through two different Tor circuits
 	go func() {
 		defer wg.Done()
-		err := torpkg.SendThroughTor(encryptedData, torInstance, ctx, onionAddress)
-		if err != nil {
-			fmt.Println("Error sending data:", err)
-		}
+		conn1, dialErr1 = torpkg.DialThroughTor(instances[0], ctx, addr1)
 	}()
-
 	go func() {
 		defer wg.Done()
-		err := torpkg.SendThroughTor(encryptedData, torInstance, ctx, onionAddress)
-		if err != nil {
-			fmt.Println("Error sending data:", err)
-		}
+		conn2, dialErr2 = torpkg.DialThroughTor(instances[1], ctx, addr2)
 	}()
-
-	// Wait for all goroutines to finish
 	wg.Wait()
+
+	if dialErr1 != nil {
+		log.Fatalf("failed to dial path 1: %v", dialErr1)
+	}
+	if dialErr2 != nil {
+		log.Fatalf("failed to dial path 2: %v", dialErr2)
+	}
+	defer conn1.Close()
+	defer conn2.Close()
+
+	fmt.Println("Connected on both paths. Starting SMKEX handshake...")
+
+	sessionKey, err := smkex.SenderHandshake(conn1, conn2)
+	if err != nil {
+		log.Fatalf("SMKEX handshake failed: %v", err)
+	}
+
+	fmt.Printf("\nHandshake complete!\nSession key: %x\n", sessionKey)
 }
